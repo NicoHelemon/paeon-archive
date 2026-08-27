@@ -56,10 +56,24 @@ encore plus courtois envers le serveur :
 python archive.py crawl --delay 2
 ```
 
-Les paramètres `--timeout` et `--retries` règlent la gestion des pannes. Relancer la
-commande remplace les mêmes chemins locaux ; les doublons sont évités au cours de chaque
-exécution. Il vaut mieux archiver l'ancien dossier avant une nouvelle collecte si l'on veut
-conserver plusieurs états datés.
+Pour une collecte plus rapide, avec une limite globale explicite et la possibilité de reprendre
+après une interruption :
+
+```bash
+python archive.py crawl --resume --requests-per-second 4
+```
+
+`--resume` recharge les lignes réussies du manifeste dont le fichier existe encore, analyse ces
+copies locales pour retrouver la suite du parcours, puis ne contacte le serveur que pour les URL
+manquantes ou précédemment échouées. Sans cette option, une nouvelle collecte retélécharge les
+ressources découvertes et remplace les mêmes chemins locaux.
+
+Le manifeste est enregistré toutes les 100 URL par défaut, ainsi qu'en cas d'interruption et à la
+fin. `--manifest-batch N` permet de modifier cette fréquence : une petite valeur sécurise davantage
+la progression, tandis qu'une valeur élevée réduit les écritures disque. Les paramètres `--timeout`
+et `--retries` règlent la gestion des pannes. `--requests-per-second` et l'ancien paramètre `--delay`
+sont mutuellement exclusifs. Il vaut mieux archiver l'ancien dossier avant une nouvelle collecte
+si l'on veut conserver plusieurs états datés.
 
 ## Consulter sans connexion Internet
 
