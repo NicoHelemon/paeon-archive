@@ -74,12 +74,22 @@ def resource_type(content_type: str, path: Path) -> str:
 
 
 class Archiver:
-    def __init__(self, output: Path, manifest: Path, delay: float, timeout: float, retries: int):
+    def __init__(
+        self,
+        output: Path,
+        manifest: Path,
+        delay: float,
+        timeout: float,
+        retries: int,
+        manifest_batch: int = 100,
+        resume: bool = False,
+    ):
         self.output = output
         self.manifest = manifest
         self.delay = delay
         self.timeout = timeout
         self.retries = retries
+        self.manifest_batch = max(manifest_batch, 1)
         self.session = requests.Session()
         self.session.headers["User-Agent"] = "Jurassica-Paeonia-Archive/1.0 (internal conservation copy)"
         self.queue: list[str] = []
@@ -87,6 +97,32 @@ class Archiver:
         self.records: dict[str, Record] = {}
         self.paths: dict[str, Path] = {}
         self.last_request = 0.0
+        self.processed_since_manifest = 0
+        if resume:
+            self.load_manifest()
+
+    def load_manifest(self) -> None:
+        """Load usable successful records so a crawl can resume without downloading them again."""
+        if not self.manifest.exists():
+            return
+        with self.manifest.open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                if not row["status"].startswith("downloaded") or not row["local_path"]:
+                    continue
+                path = Path(row["local_path"])
+                if not (self.output / path).is_file():
+                    continue
+                url = normalize_url(row["original_url"])
+                if not url:
+                    continue
+                self.records[url] = Record(
+                    url,
+                    path.as_posix(),
+                    row["resource_type"],
+                    row["retrieved_at"],
+                    row["status"],
+                )
+                self.paths[url] = path
 
     def enqueue(self, url: str) -> str | None:
         normalized = normalize_url(url)
@@ -140,31 +176,48 @@ class Archiver:
         self.output.mkdir(parents=True, exist_ok=True)
         self.enqueue(start_url)
         index = 0
-        while index < len(self.queue):
-            url = self.queue[index]
-            index += 1
-            retrieved = datetime.now(timezone.utc).isoformat()
-            try:
-                response = self.fetch(url)
-                final_url = normalize_url(response.url)
-                if not final_url:
-                    raise requests.RequestException(f"redirected outside paeon.de: {response.url}")
-                content_type = response.headers.get("Content-Type", "")
-                path = local_path_for(url, content_type)
-                destination = self.output / path
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(response.content)
-                media = resource_type(content_type, path)
-                self.paths[url] = path
-                self.records[url] = Record(url, path.as_posix(), media, retrieved, f"downloaded ({response.status_code})")
-                if media in HTML_TYPES:
-                    self.discover_html(final_url, response.content, response.encoding)
-                elif media == "text/css":
-                    self.discover_css(final_url, response.text)
-                print(f"OK   {url} -> {path}")
-            except (requests.RequestException, OSError) as exc:
-                self.records[url] = Record(url, "", "unknown", retrieved, f"failed: {exc}")
-                print(f"FAIL {url}: {exc}")
+        try:
+            while index < len(self.queue):
+                url = self.queue[index]
+                index += 1
+                retrieved = datetime.now(timezone.utc).isoformat()
+                try:
+                    existing = self.records.get(url)
+                    if existing and existing.status.startswith("downloaded"):
+                        path = self.paths[url]
+                        body = (self.output / path).read_bytes()
+                        if existing.resource_type in HTML_TYPES:
+                            self.discover_html(url, body, None)
+                        elif existing.resource_type == "text/css":
+                            self.discover_css(url, body.decode("utf-8", errors="replace"))
+                        print(f"SKIP {url} -> {path} (déjà téléchargé)")
+                    else:
+                        response = self.fetch(url)
+                        final_url = normalize_url(response.url)
+                        if not final_url:
+                            raise requests.RequestException(f"redirected outside paeon.de: {response.url}")
+                        content_type = response.headers.get("Content-Type", "")
+                        path = local_path_for(url, content_type)
+                        destination = self.output / path
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        destination.write_bytes(response.content)
+                        media = resource_type(content_type, path)
+                        self.paths[url] = path
+                        self.records[url] = Record(
+                            url, path.as_posix(), media, retrieved, f"downloaded ({response.status_code})"
+                        )
+                        if media in HTML_TYPES:
+                            self.discover_html(final_url, response.content, response.encoding)
+                        elif media == "text/css":
+                            self.discover_css(final_url, response.text)
+                        print(f"OK   {url} -> {path}")
+                except (requests.RequestException, OSError) as exc:
+                    self.records[url] = Record(url, "", "unknown", retrieved, f"failed: {exc}")
+                    print(f"FAIL {url}: {exc}")
+                self.processed_since_manifest += 1
+                if self.processed_since_manifest >= self.manifest_batch:
+                    self.write_manifest()
+        finally:
             self.write_manifest()
         self.rewrite_downloaded_files()
         self.write_manifest()
@@ -217,6 +270,7 @@ class Archiver:
             writer.writeheader()
             for record in self.records.values():
                 writer.writerow(record.__dict__)
+        self.processed_since_manifest = 0
 
 
 def verify(archive: Path, manifest: Path) -> int:
@@ -257,9 +311,23 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     crawl_parser = subparsers.add_parser("crawl", help="télécharger puis adapter la copie locale")
     crawl_parser.add_argument("--start-url", default=START_URL)
-    crawl_parser.add_argument("--delay", type=float, default=1.0, help="délai minimal entre requêtes (secondes)")
+    rate_group = crawl_parser.add_mutually_exclusive_group()
+    rate_group.add_argument("--delay", type=float, help="délai minimal entre requêtes (secondes)")
+    rate_group.add_argument(
+        "--requests-per-second",
+        type=float,
+        default=1.0,
+        help="limite globale de requêtes par seconde (par défaut : 1)",
+    )
     crawl_parser.add_argument("--timeout", type=float, default=30.0)
     crawl_parser.add_argument("--retries", type=int, default=3)
+    crawl_parser.add_argument("--resume", action="store_true", help="réutiliser les téléchargements réussis du manifeste")
+    crawl_parser.add_argument(
+        "--manifest-batch",
+        type=int,
+        default=100,
+        help="enregistrer le manifeste toutes les N URLs (par défaut : 100)",
+    )
     verify_parser = subparsers.add_parser("verify", help="contrôler la copie sans effectuer de requête réseau")
     for subparser in (crawl_parser, verify_parser):
         subparser.add_argument("--archive", type=Path, default=Path("archive"))
@@ -270,7 +338,21 @@ def main() -> int:
     start = normalize_url(args.start_url)
     if not start:
         parser.error("l'URL initiale doit appartenir à paeon.de")
-    Archiver(args.archive, args.manifest, max(args.delay, 0), args.timeout, max(args.retries, 0)).crawl(start)
+    if args.delay is not None:
+        delay = max(args.delay, 0)
+    else:
+        if args.requests_per_second <= 0:
+            parser.error("--requests-per-second doit être strictement positif")
+        delay = 1 / args.requests_per_second
+    Archiver(
+        args.archive,
+        args.manifest,
+        delay,
+        args.timeout,
+        max(args.retries, 0),
+        args.manifest_batch,
+        args.resume,
+    ).crawl(start)
     return verify(args.archive, args.manifest)
 
 
