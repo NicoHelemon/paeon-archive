@@ -1,10 +1,12 @@
 import csv
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock
 
-from archive import Archiver, MANIFEST_FIELDS
+from archive import Archiver, MANIFEST_FIELDS, verify
 
 
 class ArchiverResumeTests(unittest.TestCase):
@@ -74,6 +76,46 @@ class ArchiverResumeTests(unittest.TestCase):
 
             self.assertEqual({}, archiver.records)
             self.assertEqual({}, archiver.paths)
+
+
+class VerifyStatisticsTests(unittest.TestCase):
+    def test_verify_prints_resource_and_html_success_rates(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            archive = root / "archive"
+            manifest = root / "archive_manifest.csv"
+            page = archive / "www.paeon.de/name/index.html"
+            page.parent.mkdir(parents=True)
+            page.write_text("<p>archive</p>", encoding="utf-8")
+            with manifest.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=MANIFEST_FIELDS)
+                writer.writeheader()
+                writer.writerows(
+                    [
+                        {
+                            "original_url": "https://www.paeon.de/name/index.html",
+                            "local_path": "www.paeon.de/name/index.html",
+                            "resource_type": "text/html",
+                            "retrieved_at": "2026-08-27T00:00:00+00:00",
+                            "status": "downloaded (200)",
+                        },
+                        {
+                            "original_url": "https://www.paeon.de/name/missing.jpg",
+                            "local_path": "",
+                            "resource_type": "unknown",
+                            "retrieved_at": "2026-08-27T00:00:01+00:00",
+                            "status": "failed: timeout",
+                        },
+                    ]
+                )
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = verify(archive, manifest)
+
+            self.assertEqual(1, result)
+            self.assertIn("Téléchargements réussis : 1/2 (50.00 %)", output.getvalue())
+            self.assertIn("Pages HTML identifiées téléchargées : 1/1 (100.00 %)", output.getvalue())
 
 
 if __name__ == "__main__":

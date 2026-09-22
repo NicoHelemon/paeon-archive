@@ -103,7 +103,10 @@ python archive.py verify
 
 Elle contrôle que chaque téléchargement réussi du manifeste existe, signale chaque statut
 `failed`, détecte les liens internes `paeon.de` qui n'ont pas été adaptés et teste les cibles
-locales HTML. Elle retourne un code non nul si l'archive est incomplète.
+locales HTML. Elle affiche aussi le taux de réussite de l'ensemble des ressources découvertes
+et celui des pages HTML dont le type a pu être identifié. Ces taux mesurent les éléments présents
+dans le manifeste, pas les éventuelles pages du site que le parcours n'aurait jamais découvertes.
+Elle retourne un code non nul si l'archive est incomplète.
 
 `archive_manifest.csv` est la source de suivi : une ligne par URL, avec l'URL originale, le
 chemin local, le type MIME, la date UTC de récupération et le statut. Les pages HTTP 404,

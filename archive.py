@@ -276,15 +276,35 @@ class Archiver:
 def verify(archive: Path, manifest: Path) -> int:
     """Check manifest files and locally rewritten HTML/CSS references."""
     problems: list[str] = []
+    total_resources = 0
+    downloaded_resources = 0
+    total_html = 0
+    downloaded_html = 0
     if not manifest.exists():
         problems.append(f"manifest absent: {manifest}")
     else:
         with manifest.open(newline="", encoding="utf-8") as handle:
             for row in csv.DictReader(handle):
-                if row["status"].startswith("downloaded") and not (archive / row["local_path"]).is_file():
+                downloaded = row["status"].startswith("downloaded")
+                is_html = row["resource_type"].split(";", 1)[0].strip().lower() in HTML_TYPES
+                total_resources += 1
+                downloaded_resources += downloaded
+                total_html += is_html
+                downloaded_html += downloaded and is_html
+                if downloaded and not (archive / row["local_path"]).is_file():
                     problems.append(f"fichier absent: {row['local_path']}")
                 if row["status"].startswith("failed"):
                     problems.append(f"téléchargement échoué: {row['original_url']} ({row['status']})")
+        resource_percentage = 100 * downloaded_resources / total_resources if total_resources else 0
+        html_percentage = 100 * downloaded_html / total_html if total_html else 0
+        print(
+            f"Téléchargements réussis : {downloaded_resources}/{total_resources} "
+            f"({resource_percentage:.2f} %)"
+        )
+        print(
+            f"Pages HTML identifiées téléchargées : {downloaded_html}/{total_html} "
+            f"({html_percentage:.2f} %)"
+        )
     for page in archive.rglob("*.htm*"):
         soup = BeautifulSoup(page.read_bytes(), "html.parser")
         for attr in ("href", "src", "data", "poster", "action"):
